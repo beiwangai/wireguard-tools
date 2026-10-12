@@ -219,19 +219,24 @@ collect_endpoints() {
 declare -A SERVICE_DNS
 declare -A SERVICE_DNS_SEARCH
 collect_new_service_dns() {
-	local service get_response
+	local service get_response search_response services
 	local -A found_services
+	# Keep restoration snapshots if network service discovery fails.
+	services="$(networksetup -listallnetworkservices)" || return 1
+	if [[ $services != "An asterisk (*) denotes that a network service is disabled."$'\n'* ]]; then
+		echo "Error reading network service list; keeping saved DNS settings" >&2
+		return 1
+	fi
 	{ read -r _ && while read -r service; do
 		[[ $service == "*"* ]] && service="${service:1}"
 		found_services["$service"]=1
 		[[ -n ${SERVICE_DNS["$service"]} ]] && continue
-		get_response="$(cmd networksetup -getdnsservers "$service")"
-		[[ $get_response == *" "* ]] && get_response="Empty"
-		[[ -n $get_response ]] && SERVICE_DNS["$service"]="$get_response"
-		get_response="$(cmd networksetup -getsearchdomains "$service")"
-		[[ $get_response == *" "* ]] && get_response="Empty"
-		[[ -n $get_response ]] && SERVICE_DNS_SEARCH["$service"]="$get_response"
-	done; } < <(networksetup -listallnetworkservices)
+		# Never overwrite settings unless both original values can be restored.
+		get_response="$(get_dns_setting -getdnsservers "$service")" || continue
+		search_response="$(get_dns_setting -getsearchdomains "$service")" || continue
+		SERVICE_DNS["$service"]="$get_response"
+		SERVICE_DNS_SEARCH["$service"]="$search_response"
+	done; } <<< "$services"
 
 	for service in "${!SERVICE_DNS[@]}"; do
 		if ! [[ -n ${found_services["$service"]} ]]; then
@@ -292,18 +297,44 @@ set_endpoint_direct_route() {
 	ENDPOINTS=( "${added[@]}" )
 }
 
+# Read networksetup's list output without treating a failed query as an empty list.
+get_dns_setting() {
+	local response
+	response="$(cmd networksetup "$1" "$2")" || return 1
+	case "$response" in
+		"There aren't any DNS Servers set on "*|"There aren't any Search Domains set on "*) response=Empty ;;
+		""|*Error:*|*error:*) echo "Error reading $1 for $2: $response" >&2; return 1 ;;
+	esac
+	printf '%s\n' "$response"
+}
+
 set_dns() {
-	collect_new_service_dns
-	local service response
+	collect_new_service_dns || return 0
+	local service response desired_dns desired_search
+	desired_dns="$(printf '%s\n' "${DNS[@]}")"
+	if [[ ${#DNS_SEARCH[@]} -eq 0 ]]; then
+		desired_search=Empty
+	else
+		desired_search="$(printf '%s\n' "${DNS_SEARCH[@]}")"
+	fi
 	for service in "${!SERVICE_DNS[@]}"; do
 		while read -r response; do
 			[[ $response == *Error* ]] && echo "$response" >&2
 		done < <(
-			cmd networksetup -setdnsservers "$service" "${DNS[@]}"
-			if [[ ${#DNS_SEARCH[@]} -eq 0 ]]; then
-				cmd networksetup -setsearchdomains "$service" Empty
-			else
-				cmd networksetup -setsearchdomains "$service" "${DNS_SEARCH[@]}"
+			local current_dns current_search
+			if current_dns="$(get_dns_setting -getdnsservers "$service")"; then
+				if [[ $current_dns != "$desired_dns" ]]; then
+					cmd networksetup -setdnsservers "$service" "${DNS[@]}"
+				fi
+			fi
+			if current_search="$(get_dns_setting -getsearchdomains "$service")"; then
+				if [[ $current_search != "$desired_search" ]]; then
+					if [[ ${#DNS_SEARCH[@]} -eq 0 ]]; then
+						cmd networksetup -setsearchdomains "$service" Empty
+					else
+						cmd networksetup -setsearchdomains "$service" "${DNS_SEARCH[@]}"
+					fi
+				fi
 			fi
 		)
 	done
@@ -334,6 +365,10 @@ monitor_daemon() {
 	# endpoints change.
 	while read -u 19 -r event; do
 		[[ $event == RTM_* ]] || continue
+		# Route queries and misses do not change network configuration.
+		case "${event%%:*}" in
+			RTM_MISS|RTM_GET|RTM_GET2) continue ;;
+		esac
 		ifconfig "$REAL_INTERFACE" >/dev/null 2>&1 || break
 		[[ $AUTO_ROUTE4 -eq 1 || $AUTO_ROUTE6 -eq 1 ]] && set_endpoint_direct_route
 		[[ -z $MTU ]] && set_mtu
