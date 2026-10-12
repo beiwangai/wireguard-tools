@@ -44,12 +44,17 @@ if entry is None:
 PREFIX = text[:entry.start()]
 
 
-def run_case(name, dns, search, body, *, fail_get=None, fail_set=None, events=None):
+def run_case(name, dns, search, body, *, fail_get=None, fail_set=None, events=None,
+             disabled=False, banner_only=None):
     with tempfile.TemporaryDirectory(prefix="wg-quick-test-") as temporary:
         folder = Path(temporary)
         state_path = folder / "state.json"
         writes_path = folder / "writes.jsonl"
         initial = {"services": {"Wi-Fi": {"dns": dns, "search": search}}}
+        if disabled:
+            initial["services"]["Wi-Fi"]["disabled"] = True
+        if banner_only:
+            initial["banner_only"] = banner_only
         if fail_get:
             initial["fail_get"] = fail_get
         if fail_set:
@@ -282,9 +287,73 @@ del_dns
         assert writes[-1]["values"] == ["old.example"]
 
 
+def disabled_empty_search_unchanged():
+    writes, state, _ = run_case("disabled-empty-search", ["1.1.1.1"], [], '''
+DNS=(1.1.1.1); DNS_SEARCH=()
+set_dns
+set_dns
+set_dns
+''', disabled=True)
+    expect_fields(writes, [])
+    assert state["dns"] == ["1.1.1.1"] and state["search"] == [], state
+
+
+def disabled_search_unchanged():
+    writes, state, _ = run_case("disabled-search", ["1.1.1.1"], ["corp.example"], '''
+DNS=(1.1.1.1); DNS_SEARCH=(corp.example)
+set_dns
+set_dns
+set_dns
+''', disabled=True)
+    expect_fields(writes, [])
+    assert state["dns"] == ["1.1.1.1"] and state["search"] == ["corp.example"], state
+
+
+def disabled_restoration():
+    writes, state, _ = run_case("disabled-restore", ["9.9.9.9", "149.112.112.112"],
+                               ["old.example"], '''
+DNS=(1.1.1.1); DNS_SEARCH=()
+set_dns
+set_dns
+del_dns
+''', disabled=True)
+    assert state["dns"] == ["9.9.9.9", "149.112.112.112"], state
+    assert state["search"] == ["old.example"], state
+    expect_fields(writes, ["dns", "search", "dns", "search"])
+    assert writes[-2]["values"] == ["9.9.9.9", "149.112.112.112"]
+    assert writes[-1]["values"] == ["old.example"]
+
+
+def disabled_empty_restoration():
+    writes, state, _ = run_case("disabled-empty-restore", [], [], '''
+DNS=(1.1.1.1); DNS_SEARCH=(corp.example)
+set_dns
+set_dns
+del_dns
+''', disabled=True)
+    assert state["dns"] == [] and state["search"] == [], state
+    expect_fields(writes, ["dns", "search", "dns", "search"])
+    assert writes[-2]["values"] == ["Empty"]
+    assert writes[-1]["values"] == ["Empty"]
+
+
+def disabled_banner_only():
+    for field in ("dns", "search"):
+        writes, state, _ = run_case("disabled-banner-only", ["9.9.9.9"],
+                                   ["old.example"], '''
+DNS=(1.1.1.1); DNS_SEARCH=(corp.example)
+set_dns
+del_dns
+''', disabled=True, banner_only=field)
+        expect_fields(writes, [])
+        assert state["dns"] == ["9.9.9.9"] and state["search"] == ["old.example"], state
+
+
 cases = [unchanged, dns_changed, search_changed, empty_search, restoration,
          getter_error, setter_error, miss_get_monitor, no_dns_monitor,
-         change_monitor, added_service, service_list_error]
+         change_monitor, added_service, service_list_error,
+         disabled_empty_search_unchanged, disabled_search_unchanged,
+         disabled_restoration, disabled_empty_restoration, disabled_banner_only]
 failures = 0
 for case in cases:
     try:

@@ -17,9 +17,14 @@ if operation == "-listallnetworkservices":
             print("Error: simulated service-list failure")
         sys.exit(state["fail_list"])
     print("An asterisk (*) denotes that a network service is disabled.")
-    print("\n".join(state["services"]))
+    print("\n".join(("*" if settings.get("disabled") else "") + name
+                    for name, settings in state["services"].items()))
 elif operation in ("-getdnsservers", "-getsearchdomains"):
     field = "dns" if operation == "-getdnsservers" else "search"
+    if state["services"][service].get("disabled"):
+        print(f"(Please note: {service} is currently disabled)")
+    if state.get("banner_only") == field:
+        sys.exit(0)
     if state.get("fail_get") == field:
         print("Error: simulated getter failure")
         sys.exit(1)

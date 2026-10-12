@@ -301,6 +301,11 @@ set_endpoint_direct_route() {
 get_dns_setting() {
 	local response
 	response="$(cmd networksetup "$1" "$2")" || return 1
+	# Disabled services prepend a notice to otherwise unchanged getter output.
+	case "$response" in
+		"(Please note: $2 is currently disabled)") response= ;;
+		"(Please note: $2 is currently disabled)"$'\n'*) response="${response#*$'\n'}" ;;
+	esac
 	case "$response" in
 		"There aren't any DNS Servers set on "*|"There aren't any Search Domains set on "*) response=Empty ;;
 		""|*Error:*|*error:*) echo "Error reading $1 for $2: $response" >&2; return 1 ;;
